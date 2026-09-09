@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 智能修图</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .upload-area { 
+            background: white; border: 2px dashed #ddd; border-radius: 12px; 
+            padding: 60px 20px; text-align: center; cursor: pointer;
+            transition: all 0.3s;
+        }
+        .upload-area:hover { border-color: #007aff; background: #f8f9ff; }
+        .upload-area.dragover { border-color: #007aff; background: #e8edff; }
+        .preview-section { 
+            display: none; 
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .preview-section.active { display: grid; }
+        .card { 
+            background: white; border-radius: 12px; padding: 16px; 
+            box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+        }
+        .card img { width: 100%; border-radius: 8px; max-height: 300px; object-fit: contain; }
+        .card h4 { margin-bottom: 8px; color: #333; }
+        .analysis-text { 
+            font-size: 14px; color: #666; 
+            max-height: 200px; overflow-y: auto;
+            background: #f8f9fa; padding: 12px; border-radius: 8px;
+            white-space: pre-wrap;
+        }
+        .tool-list { 
+            font-size: 13px; color: #444;
+            background: #f8f9fa; padding: 12px; border-radius: 8px;
+            max-height: 200px; overflow-y: auto;
+        }
+        .tool-item { 
+            display: flex; justify-content: space-between; 
+            padding: 4px 0; border-bottom: 1px solid #eee;
+        }
+        .btn { 
+            background: #007aff; color: white; border: none; 
+            padding: 12px 32px; border-radius: 8px; font-size: 16px;
+            cursor: pointer; transition: all 0.2s;
+        }
+        .btn:hover { background: #0055cc; }
+        .btn:disabled { background: #aaa; cursor: not-allowed; }
+        .btn-secondary { background: #34c759; }
+        .btn-secondary:hover { background: #28a745; }
+        .feedback-input {
+            width: 100%; padding: 12px; border: 1px solid #ddd;
+            border-radius: 8px; font-size: 14px; margin: 10px 0;
+        }
+        .status { 
+            margin: 10px 0; padding: 12px; border-radius: 8px;
+            background: #e8f5e9; color: #2e7d32; display: none;
+        }
+        .status.active { display: block; }
+        .spinner {
+            display: inline-block; width: 20px; height: 20px;
+            border: 3px solid #f3f3f3; border-top: 3px solid #007aff;
+            border-radius: 50%; animation: spin 1s linear infinite;
+            vertical-align: middle; margin-right: 10px;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .controls { margin-top: 20px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+        .error-text { color: #d32f2f; font-size: 13px; margin-top: 4px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1 style="margin-bottom: 20px;">📸 AI 智能修图</h1>
+    
+    <div class="upload-area" id="dropZone">
+        <p style="font-size: 24px; margin-bottom: 8px;">📤 拖拽或点击上传</p>
+        <p style="color: #999;">支持 JPG / PNG / ARW / CR2 / NEF / DNG</p>
+        <input type="file" id="fileInput" accept=".arw,.cr2,.cr3,.nef,.dng,.raf,.jpg,.jpeg,.png" style="display:none;">
+    </div>
+    
+    <div class="status" id="status"></div>
+    
+    <div class="preview-section" id="previewSection">
+        <div class="card">
+            <h4>📷 原图预览</h4>
+            <img id="previewImg" src="" alt="预览">
+        </div>
+        <div class="card">
+            <h4>🤖 AI 分析</h4>
+            <div class="analysis-text" id="analysisText">等待分析...</div>
+            <div style="margin-top:8px; font-size:12px; color:#999;" id="sceneTags"></div>
+        </div>
+        <div class="card">
+            <h4>🔧 修图步骤</h4>
+            <div class="tool-list" id="toolList">等待生成...</div>
+        </div>
+    </div>
+    
+    <div class="controls" id="controls" style="display:none;">
+        <input class="feedback-input" id="feedback" placeholder="例如：再暖一点 / 增加对比度 / 暗部提亮" style="flex:1;">
+        <button class="btn" id="editBtn">🎨 一键修图</button>
+        <button class="btn btn-secondary" id="downloadBtn" style="display:none;">⬇️ 下载结果</button>
+    </div>
+    
+    <div id="resultSection" style="display:none; margin-top:20px;">
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px;">
+            <div class="card">
+                <h4>📷 原图</h4>
+                <img id="beforeImg" src="">
+            </div>
+            <div class="card">
+                <h4>✨ 修后</h4>
+                <img id="afterImg" src="">
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const API_BASE = 'http://localhost:8000';
+    let fileId = null;
+    let outputPath = null;
+    let analysisData = null;
+
+    const dropZone = document.getElementById('dropZone');
+    const fileInput = document.getElementById('fileInput');
+
+    dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        dropZone.classList.add('dragover');
+    });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+    dropZone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropZone.classList.remove('dragover');
+        if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+    });
+    fileInput.addEventListener('change', () => {
+        if (fileInput.files.length) handleFile(fileInput.files[0]);
+    });
+
+    async function handleFile(file) {
+        const ext = file.name.split('.').pop().toLowerCase();
+        const allowed = ['arw','cr2','cr3','nef','dng','raf','jpg','jpeg','png'];
+        if (!allowed.includes(ext)) {
+            alert('请上传支持的格式: ' + allowed.join(', '));
+            return;
+        }
+
+        showStatus('上传中...', true);
+        
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        try {
+            const resp = await fetch(`${API_BASE}/upload`, { method: 'POST', body: formData });
+            if (!resp.ok) throw new Error(`上传失败: ${resp.status}`);
+            
+            const data = await resp.json();
+            fileId = data.file_id;
+            
+            document.getElementById('previewImg').src = `${API_BASE}${data.preview}`;
+            document.getElementById('previewSection').classList.add('active');
+            document.getElementById('controls').style.display = 'flex';
+            
+            await analyzePhoto();
+            showStatus('上传成功，AI分析完成 ✅', false);
+        } catch (e) {
+            showStatus('上传失败: ' + e.message, true);
+        }
+    }
+
+    async function analyzePhoto() {
+        document.getElementById('analysisText').textContent = '🤔 分析中...';
+        document.getElementById('toolList').innerHTML = '<div class="spinner"></div> 生成修图方案...';
+        
+        try {
+            const resp = await fetch(`${API_BASE}/ai-analyze?file_id=${fileId}`);
+            if (!resp.ok) throw new Error(`分析失败: ${resp.status}`);
+            
+            const data = await resp.json();
+            analysisData = data;
+            
+            document.getElementById('analysisText').textContent = data.scene_analysis || '无分析结果';
+            
+            const tags = [];
+            if (data.scene_type) tags.push(`🏷️ ${data.scene_type}`);
+            if (data.light_condition) tags.push(`☀️ ${data.light_condition}`);
+            if (data.color_tone) tags.push(`🎨 ${data.color_tone}`);
+            document.getElementById('sceneTags').textContent = tags.join(' | ');
+            
+            const tools = data.edit_tools || [];
+            if (tools.length) {
+                document.getElementById('toolList').innerHTML = tools.map((t, i) => 
+                    `<div class="tool-item">
+                        <span>${i+1}. ${t.tool}</span>
+                        <span style="color:#666;font-size:12px;">${Object.keys(t.params).join(', ')}</span>
+                    </div>`
+                ).join('');
+            } else {
+                document.getElementById('toolList').textContent = '未生成修图步骤';
+            }
+        } catch (e) {
+            document.getElementById('analysisText').textContent = '分析失败: ' + e.message;
+        }
+    }
+
+    document.getElementById('editBtn').addEventListener('click', async () => {
+        const feedback = document.getElementById('feedback').value.trim();
+        const btn = document.getElementById('editBtn');
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span> 修图中...';
+        
+        showStatus('🎨 AI修图进行中...', true);
+        
+        try {
+            // ✅ 修复：只传 fileId，不加扩展名
+            const body = { raw_path: fileId };
+            if (feedback) body.feedback = feedback;
+            
+            const resp = await fetch(`${API_BASE}/ai-edit`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            
+            if (!resp.ok) {
+                const errText = await resp.text();
+                throw new Error(`HTTP ${resp.status}: ${errText}`);
+            }
+            
+            const data = await resp.json();
+            
+            if (data.success) {
+                outputPath = data.output_path;
+                const downloadUrl = data.download_url;
+                const downloadId = downloadUrl.split('/').pop();
+                
+                document.getElementById('downloadBtn').style.display = 'inline-block';
+                document.getElementById('downloadBtn').onclick = () => {
+                    window.open(`${API_BASE}${downloadUrl}`);
+                };
+                
+                document.getElementById('beforeImg').src = document.getElementById('previewImg').src;
+                document.getElementById('afterImg').src = `${API_BASE}${downloadUrl}?t=${Date.now()}`;
+                document.getElementById('resultSection').style.display = 'block';
+                
+                showStatus(`✅ 修图完成！共执行 ${data.tools_used || 0} 步操作`, false);
+            } else {
+                throw new Error(data.message || '修图失败');
+            }
+        } catch (e) {
+            showStatus('修图失败: ' + e.message, true);
+            console.error('修图错误:', e);
+        }
+        
+        btn.disabled = false;
+        btn.innerHTML = '🎨 一键修图';
+    });
+
+    function showStatus(msg, loading) {
+        const el = document.getElementById('status');
+        el.classList.add('active');
+        el.innerHTML = (loading ? '<span class="spinner"></span>' : '✅ ') + msg;
+        el.style.background = loading ? '#fff3cd' : '#e8f5e9';
+        el.style.color = loading ? '#856404' : '#2e7d32';
+    }
+</script>
+</body>
+</html>
