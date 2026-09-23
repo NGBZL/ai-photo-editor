@@ -1,0 +1,98 @@
+
+services:
+  # ---------- 消息队列 / 任务结果后端 ----------
+  redis:
+    image: redis:alpine
+    container_name: ai-photo-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - ai-net
+
+  # ---------- FastAPI 后端 ----------
+  api:
+    build: .
+    container_name: ai-photo-api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    networks:
+      - ai-net
+
+  # ---------- Celery worker（与 api 同一镜像，只换启动命令）----------
+  worker:
+    build: .
+    container_name: ai-photo-worker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+    command: celery -A tasks worker --loglevel=info --concurrency=2
+    networks:
+      - ai-net
+
+  # ---------- Flower：Celery 任务监控 UI ----------
+  flower:
+    build: .
+    container_name: ai-photo-flower
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      # Flower 2.x 默认把 /api/* 锁上（未配置认证时返回 401），
+      # 而它的面板前端就是调 /api/workers 取数据的 —— 不放开这个开关，
+      # http://localhost:5555 能打开但面板是空的。仅本机使用，故放开。
+      FLOWER_UNAUTHENTICATED_API: "true"
+    command: celery -A tasks flower --port=5555 --broker=redis://redis:6379/0
+    ports:
+      - "5555:5555"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - ai-net
+
+  # ---------- Nginx 网关 + 前端托管 ----------
+  nginx:
+    image: nginx:alpine
+    container_name: ai-photo-nginx
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./ui.html:/usr/share/nginx/html/ui.html:ro
+    networks:
+      - ai-net
+
+volumes:
+  redis-data:
+
+networks:
+  ai-net:
+    driver: bridge

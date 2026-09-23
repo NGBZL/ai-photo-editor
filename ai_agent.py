@@ -8,6 +8,20 @@ from PIL import Image
 import numpy as np
 
 
+def _tool_name(call: Dict[str, Any]) -> Optional[str]:
+    """
+    取工具名，兼容不同模型的输出习惯。
+
+    模型有时返回 {"tool": "adjust_hsl", "params": {...}}，
+    有时返回 {"name": "adjust_hsl", "params": {...}}。
+    如果只认 'tool'，拿到的就是 None，于是每一步都变成
+    "未知工具: None" 被静默跳过 —— 任务照样报成功，但图片其实一步都没修。
+    """
+    if not isinstance(call, dict):
+        return None
+    return call.get('tool') or call.get('name') or call.get('tool_name')
+
+
 class DeepSeekPhotoAgent:
     """
     DeepSeek V4 多模态修图Agent
@@ -104,8 +118,9 @@ class DeepSeekPhotoAgent:
                 print(f"打开图片失败: {e}")
                 raise ValueError(f"无法打开图片: {e}")
         
-        # 转换为RGB
-        if img.mode in ('RGBA', 'LA', 'P'):
+        # 转换为RGB（灰度 L 保留；调色板 P / RGBA / LA / 16位 I;16 等都要转，
+        # 否则下面 img.save(buffer, 'JPEG') 会抛 cannot write mode xxx as JPEG）
+        if img.mode not in ('RGB', 'L'):
             img = img.convert('RGB')
         
         # 缩放到最大边不超过 max_size
@@ -136,7 +151,22 @@ class DeepSeekPhotoAgent:
 2. scene_type: 场景类型
 3. light_condition: 光线条件
 4. color_tone: 色彩倾向
-5. edit_tools: 工具调用数组
+5. edit_tools: 工具调用数组。每一项必须严格写成
+   {"tool": "<工具名>", "params": {<该工具的参数>}}
+   注意：工具名的字段名必须叫 "tool"，不要写成 name / tool_name / function。
+
+示例（照着这个结构输出）：
+{
+  "scene_analysis": "……",
+  "scene_type": "风光",
+  "light_condition": "黄金时刻",
+  "color_tone": "暖调，高饱和",
+  "edit_tools": [
+    {"tool": "adjust_exposure", "params": {"exposure": 0.2, "contrast": 10}},
+    {"tool": "adjust_hsl", "params": {"saturation": 15, "lightness": -5}},
+    {"tool": "tone_curve", "params": {"points": [{"x": 0, "y": 0}, {"x": 128, "y": 132}, {"x": 255, "y": 255}]}}
+  ]
+}
 
 ## 可用工具及参数
 1. adjust_exposure: exposure(-5~5), contrast(-100~100), highlights(-100~100), shadows(-100~100)
@@ -185,12 +215,14 @@ class PhotoEditOrchestrator:
         tools_calls = analysis.get('edit_tools', [])
         print(f"🔧 执行 {len(tools_calls)} 步修图...")
         
+        applied = 0
         for i, call in enumerate(tools_calls):
-            tool_name = call.get('tool')
-            params = call.get('params', {})
+            tool_name = _tool_name(call)
+            params = call.get('params') or {}
             print(f"  步骤 {i+1}: {tool_name}")
             try:
                 img = ToolRegistry.execute_tool(tool_name, img, params)
+                applied += 1
             except Exception as e:
                 print(f"  ⚠️ {tool_name} 执行失败: {e}")
                 continue
@@ -206,7 +238,8 @@ class PhotoEditOrchestrator:
         return {
             "analysis": analysis,
             "output_path": output_path,
-            "tools_executed": len(tools_calls),
+            "tools_executed": applied,
+            "tools_requested": len(tools_calls),
             "elapsed_seconds": elapsed
         }
     
@@ -243,15 +276,19 @@ class PhotoEditOrchestrator:
         import uuid
         
         img = RAWProcessor.load(raw_path, output_bps=8)
+        applied = 0
         for call in tools_calls:
+            tool_name = _tool_name(call)
+            params = call.get('params') or {}
             try:
-                img = ToolRegistry.execute_tool(call['tool'], img, call['params'])
+                img = ToolRegistry.execute_tool(tool_name, img, params)
+                applied += 1
             except Exception as e:
-                print(f"执行工具 {call.get('tool')} 失败: {e}")
+                print(f"执行工具 {tool_name} 失败: {e}")
                 continue
         
         if not output_path:
             output_path = f"outputs/feedback_edit_{uuid.uuid4()}.jpg"
         
         RAWProcessor.save(img, output_path, "jpg", quality=95)
-        return {"output_path": output_path, "tools_executed": len(tools_calls)}
+        return {"output_path": output_path, "tools_executed": applied}

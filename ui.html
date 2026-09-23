@@ -121,7 +121,7 @@
 </div>
 
 <script>
-    const API_BASE = 'http://localhost:8000';
+    const API_BASE = 'http://localhost';
     let fileId = null;
     let outputPath = null;
     let analysisData = null;
@@ -198,8 +198,8 @@
             if (tools.length) {
                 document.getElementById('toolList').innerHTML = tools.map((t, i) => 
                     `<div class="tool-item">
-                        <span>${i+1}. ${t.tool}</span>
-                        <span style="color:#666;font-size:12px;">${Object.keys(t.params).join(', ')}</span>
+                        <span>${i+1}. ${t.tool || t.name || '未知'}</span>
+                        <span style="color:#666;font-size:12px;">${Object.keys(t.params || {}).join(', ')}</span>
                     </div>`
                 ).join('');
             } else {
@@ -214,15 +214,15 @@
         const feedback = document.getElementById('feedback').value.trim();
         const btn = document.getElementById('editBtn');
         btn.disabled = true;
-        btn.innerHTML = '<span class="spinner"></span> 修图中...';
+        btn.innerHTML = '<span class="spinner"></span> 提交任务...';
         
-        showStatus('🎨 AI修图进行中...', true);
+        showStatus('🎨 提交修图任务...', true);
         
         try {
-            // ✅ 修复：只传 fileId，不加扩展名
             const body = { raw_path: fileId };
             if (feedback) body.feedback = feedback;
             
+            // 1. 提交任务
             const resp = await fetch(`${API_BASE}/ai-edit`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -235,32 +235,66 @@
             }
             
             const data = await resp.json();
+            const taskId = data.task_id;
+            console.log('任务已提交:', taskId);
             
-            if (data.success) {
-                outputPath = data.output_path;
-                const downloadUrl = data.download_url;
-                const downloadId = downloadUrl.split('/').pop();
+            // 2. SSE 订阅任务状态（替代 setInterval 轮询）
+            let finished = false;
+            const es = new EventSource(`${API_BASE}/task/${taskId}/stream`);
+
+            es.onmessage = (event) => {
+                const statusData = JSON.parse(event.data);
                 
-                document.getElementById('downloadBtn').style.display = 'inline-block';
-                document.getElementById('downloadBtn').onclick = () => {
-                    window.open(`${API_BASE}${downloadUrl}`);
-                };
-                
-                document.getElementById('beforeImg').src = document.getElementById('previewImg').src;
-                document.getElementById('afterImg').src = `${API_BASE}${downloadUrl}?t=${Date.now()}`;
-                document.getElementById('resultSection').style.display = 'block';
-                
-                showStatus(`✅ 修图完成！共执行 ${data.tools_used || 0} 步操作`, false);
-            } else {
-                throw new Error(data.message || '修图失败');
-            }
+                if (statusData.state === 'PROGRESS' || statusData.state === 'STARTED') {
+                    const msg = statusData.meta?.message || '处理中...';
+                    showStatus(`🎨 ${msg}`, true);
+                    
+                } else if (statusData.state === 'SUCCESS') {
+                    finished = true;   // 先置位：服务端发完就关流，别让 onerror 误报"连接中断"
+                    es.close();
+                    
+                    const result = statusData.result;
+                    const outputPath = result.output_path;
+                    const downloadId = outputPath.split(/[\\/]/).pop().split('.')[0];
+                    
+                    document.getElementById('downloadBtn').style.display = 'inline-block';
+                    document.getElementById('downloadBtn').onclick = () => {
+                        window.open(`${API_BASE}/download/${downloadId}`);
+                    };
+                    
+                    document.getElementById('beforeImg').src = document.getElementById('previewImg').src;
+                    document.getElementById('afterImg').src = `${API_BASE}/download/${downloadId}?t=${Date.now()}`;
+                    document.getElementById('resultSection').style.display = 'block';
+                    
+                    showStatus(`✅ 修图完成！共执行 ${result.tools_executed || 0} 步操作`, false);
+                    
+                    btn.disabled = false;
+                    btn.innerHTML = '🎨 一键修图';
+                    
+                } else if (statusData.state === 'FAILURE') {
+                    finished = true;
+                    es.close();
+                    showStatus('修图失败: ' + (statusData.error || '未知错误'), true);
+                    btn.disabled = false;
+                    btn.innerHTML = '🎨 一键修图';
+                }
+            };
+
+            es.onerror = (err) => {
+                if (finished) return;   // 任务已正常结束，这不是错误
+                console.error('SSE 错误:', err);
+                es.close();
+                showStatus('连接中断，请重试', true);
+                btn.disabled = false;
+                btn.innerHTML = '🎨 一键修图';
+            };
+            
         } catch (e) {
-            showStatus('修图失败: ' + e.message, true);
-            console.error('修图错误:', e);
+            showStatus('提交失败: ' + e.message, true);
+            console.error('提交错误:', e);
+            btn.disabled = false;
+            btn.innerHTML = '🎨 一键修图';
         }
-        
-        btn.disabled = false;
-        btn.innerHTML = '🎨 一键修图';
     });
 
     function showStatus(msg, loading) {

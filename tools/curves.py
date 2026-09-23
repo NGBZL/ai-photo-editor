@@ -1,6 +1,32 @@
 import numpy as np
+import cv2
 from .base import Tool
 from typing import Dict, Any, List
+
+
+def _build_curve(points: List[Dict]) -> np.ndarray:
+    """
+    由控制点生成 256 点查表曲线（给 cv2.LUT 用）。
+
+    scipy 的 cubic 插值至少需要 4 个控制点，只给 3 个点会抛 ValueError；
+    2 个点只能线性插值。这里按点数自动降级，
+    避免整步修图因为一个插值异常被静默跳过（AI 给 3 个点是常见情况）。
+    """
+    xs = [p['x'] for p in points]
+    ys = [p['y'] for p in points]
+
+    if len(points) >= 4:
+        import scipy.interpolate as si
+        f = si.interp1d(xs, ys, kind='cubic', fill_value='extrapolate')
+        return np.clip(f(np.arange(256)), 0, 255).astype(np.uint8)
+
+    if len(points) == 3:
+        import scipy.interpolate as si
+        f = si.interp1d(xs, ys, kind='quadratic', fill_value='extrapolate')
+        return np.clip(f(np.arange(256)), 0, 255).astype(np.uint8)
+
+    return np.linspace(ys[0], ys[-1], 256).astype(np.uint8)
+
 
 class ToneCurveTool(Tool):
     """RGB曲线 - 所有通道统一曲线"""
@@ -20,19 +46,7 @@ class ToneCurveTool(Tool):
         return self._apply_curve(img, points)
     
     def _apply_curve(self, img: np.ndarray, points: List[Dict]) -> np.ndarray:
-        # 生成查表
-        xs = [p['x'] for p in points]
-        ys = [p['y'] for p in points]
-        
-        # 插值生成完整256点曲线
-        import scipy.interpolate as si
-        if len(points) > 2:
-            f = si.interp1d(xs, ys, kind='cubic', fill_value='extrapolate')
-            curve = np.clip(f(np.arange(256)), 0, 255).astype(np.uint8)
-        else:
-            curve = np.linspace(ys[0], ys[1], 256).astype(np.uint8)
-        
-        return cv2.LUT(img, curve)
+        return cv2.LUT(img, _build_curve(points))
 
 
 class RGBCurveTool(Tool):
@@ -56,14 +70,5 @@ class RGBCurveTool(Tool):
         result = img.copy()
         for idx, key in enumerate(['red_points', 'green_points', 'blue_points']):
             if params.get(key):
-                points = params[key]
-                xs = [p['x'] for p in points]
-                ys = [p['y'] for p in points]
-                if len(points) > 2:
-                    import scipy.interpolate as si
-                    f = si.interp1d(xs, ys, kind='cubic', fill_value='extrapolate')
-                    curve = np.clip(f(np.arange(256)), 0, 255).astype(np.uint8)
-                else:
-                    curve = np.linspace(ys[0], ys[1], 256).astype(np.uint8)
-                result[:,:,idx] = cv2.LUT(result[:,:,idx], curve)
+                result[:,:,idx] = cv2.LUT(result[:,:,idx], _build_curve(params[key]))
         return result

@@ -28,12 +28,16 @@ class LUTTool(Tool):
             return img
     
     def _film_lut(self, img, intensity):
-        # S曲线
+        # S曲线（模拟胶片）
         result = img.astype(np.float32) / 255
-        result = result / (result + (1 - result) * 0.5)  # 模拟胶片S曲线
+        film = result / (result + (1 - result) * 0.5)
+        # 必须按 intensity 混合，否则 intensity=0 也会把曲线整条作用上去：
+        # 实测旧代码 intensity=0 时 mean 从 134.3 涨到 155.7（暗部 25 -> 45），
+        # 等于"参数设成 0 却拿到 100% 的效果"，和 adjust_exposure 那类问题是同一性质。
+        result = result * (1.0 - intensity) + film * intensity
         # 高光偏暖，阴影偏青
         result[:,:,2] *= (1 + 0.05 * intensity)  # B通道提亮（偏青）
-        return np.clip(result * 255, 0, 255).astype(np.uint8)
+        return np.clip(np.rint(result * 255), 0, 255).astype(np.uint8)
     
     def _cinematic_lut(self, img, intensity):
         # 青橙色调：阴影偏青，肤色（橙）提亮
